@@ -162,6 +162,7 @@ class _HomePageState extends State<HomePage> {
   bool _loaded = false;
   late int _year;
   late int _month;
+  int _tab = 0;
 
   @override
   void initState() {
@@ -291,6 +292,28 @@ class _HomePageState extends State<HomePage> {
 
   // ---- ساخت صفحه ----
 
+  int _sum(int y, int m, bool income) {
+    return _expenses
+        .where((e) =>
+            e.isIncome == income && e.date.year == y && e.date.month == m)
+        .fold(0, (sum, e) => sum + e.amount);
+  }
+
+  List<List<int>> _lastMonths(int count) {
+    final out = <List<int>>[];
+    var y = _year;
+    var m = _month;
+    for (var i = 0; i < count; i++) {
+      out.insert(0, [y, m]);
+      m--;
+      if (m < 1) {
+        m = 12;
+        y--;
+      }
+    }
+    return out;
+  }
+
   Widget _stat(String label, int value, Color? color) {
     return Expanded(
       child: Column(
@@ -311,9 +334,270 @@ class _HomePageState extends State<HomePage> {
     );
   }
 
+  Widget _monthSelector() {
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      child: Row(
+        children: [
+          IconButton(
+            icon: const Icon(Icons.chevron_right),
+            tooltip: 'ماه قبل',
+            onPressed: () => _shiftMonth(-1),
+          ),
+          Expanded(
+            child: Text(
+              '${_monthNames[_month - 1]} ${toPersianDigits('$_year')}',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.chevron_left),
+            tooltip: 'ماه بعد',
+            onPressed: _canGoNext ? () => _shiftMonth(1) : null,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _summaryCard(int income, int expense, int balance) {
+    final scheme = Theme.of(context).colorScheme;
+    return Card(
+      margin: const EdgeInsets.fromLTRB(16, 4, 16, 8),
+      color: scheme.primaryContainer,
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
+        child: Row(
+          children: [
+            _stat('درآمد', income, Colors.green.shade800),
+            _stat('هزینه', expense, Colors.red.shade700),
+            _stat(
+              balance < 0 ? 'کسری' : 'مانده',
+              balance,
+              balance < 0 ? Colors.red.shade700 : null,
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _transactionsList(List<Expense> items) {
+    if (items.isEmpty) {
+      return const Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(Icons.account_balance_wallet_outlined, size: 64),
+            SizedBox(height: 12),
+            Text('در این ماه چیزی ثبت نشده'),
+            SizedBox(height: 4),
+            Text('با دکمه «ثبت جدید» شروع کنید'),
+          ],
+        ),
+      );
+    }
+    return ListView.builder(
+      padding: const EdgeInsets.only(bottom: 88),
+      itemCount: items.length,
+      itemBuilder: (context, i) {
+        final e = items[i];
+        final color = e.isIncome ? Colors.green.shade800 : Colors.red.shade700;
+        return Dismissible(
+          key: ValueKey(e.id),
+          direction: DismissDirection.horizontal,
+          background: Container(
+            color: Colors.red.shade100,
+            alignment: AlignmentDirectional.centerStart,
+            padding: const EdgeInsets.symmetric(horizontal: 20),
+            child: const Icon(Icons.delete_outline),
+          ),
+          onDismissed: (_) => _removeExpense(e),
+          child: ListTile(
+            onTap: () => _editExpense(e),
+            leading: CircleAvatar(
+              backgroundColor:
+                  e.isIncome ? Colors.green.shade100 : Colors.red.shade50,
+              child: Icon(e.category.icon, color: color),
+            ),
+            title: Text(e.title),
+            subtitle: Text('${e.category.name} • ${formatJalali(e.date)}'),
+            trailing: Text(
+              '${formatMoney(e.amount)} تومان',
+              style: TextStyle(fontWeight: FontWeight.bold, color: color),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  // ---- گزارش ----
+
+  Widget _catRow(String name, int amount, int total) {
+    final cat = findCategory(name, false);
+    final frac = total == 0 ? 0.0 : amount / total;
+    final percent = (frac * 100).round();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Column(
+        children: [
+          Row(
+            children: [
+              Icon(cat.icon, size: 20),
+              const SizedBox(width: 8),
+              Expanded(child: Text(name)),
+              Text(
+                '${formatMoney(amount)} تومان',
+                style: const TextStyle(fontWeight: FontWeight.bold),
+              ),
+              const SizedBox(width: 8),
+              SizedBox(
+                width: 38,
+                child: Text(
+                  toPersianDigits('${percent}٪'),
+                  textAlign: TextAlign.end,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 6),
+          ClipRRect(
+            borderRadius: BorderRadius.circular(4),
+            child: LinearProgressIndicator(value: frac, minHeight: 8),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _legendDot(Color color, String label) {
+    return Row(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        Container(
+          width: 10,
+          height: 10,
+          decoration: BoxDecoration(color: color, shape: BoxShape.circle),
+        ),
+        const SizedBox(width: 4),
+        Text(label, style: const TextStyle(fontSize: 12)),
+      ],
+    );
+  }
+
+  Widget _bar(Color color, double height) {
+    return Container(
+      width: 10,
+      height: height,
+      decoration: BoxDecoration(
+        color: color,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(3)),
+      ),
+    );
+  }
+
+  Widget _trendChart() {
+    final months = _lastMonths(6);
+    final incomes = months.map((ym) => _sum(ym[0], ym[1], true)).toList();
+    final expenses = months.map((ym) => _sum(ym[0], ym[1], false)).toList();
+    var maxV = 0;
+    for (final v in [...incomes, ...expenses]) {
+      if (v > maxV) maxV = v;
+    }
+    if (maxV == 0) {
+      return const Padding(
+        padding: EdgeInsets.symmetric(vertical: 24),
+        child: Center(child: Text('هنوز داده‌ای برای نمودار نیست')),
+      );
+    }
+    const chartHeight = 110.0;
+    return Column(
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            _legendDot(Colors.green.shade600, 'درآمد'),
+            const SizedBox(width: 16),
+            _legendDot(Colors.red.shade400, 'هزینه'),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Row(
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            for (var i = 0; i < months.length; i++)
+              Expanded(
+                child: Column(
+                  children: [
+                    SizedBox(
+                      height: chartHeight,
+                      child: Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        crossAxisAlignment: CrossAxisAlignment.end,
+                        children: [
+                          _bar(Colors.green.shade600,
+                              incomes[i] / maxV * chartHeight),
+                          const SizedBox(width: 3),
+                          _bar(Colors.red.shade400,
+                              expenses[i] / maxV * chartHeight),
+                        ],
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      _monthNames[months[i][1] - 1],
+                      style: const TextStyle(fontSize: 10),
+                    ),
+                  ],
+                ),
+              ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _reportView(List<Expense> items) {
+    final expenseItems = items.where((e) => !e.isIncome).toList();
+    final total = expenseItems.fold(0, (sum, e) => sum + e.amount);
+    final byCat = <String, int>{};
+    for (final e in expenseItems) {
+      byCat[e.category.name] = (byCat[e.category.name] ?? 0) + e.amount;
+    }
+    final rows = byCat.entries.toList()
+      ..sort((a, b) => b.value.compareTo(a.value));
+
+    return ListView(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+      children: [
+        const Text(
+          'هزینه‌ها بر اساس دسته',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 12),
+        if (rows.isEmpty)
+          const Padding(
+            padding: EdgeInsets.symmetric(vertical: 24),
+            child: Center(child: Text('در این ماه هزینه‌ای ثبت نشده')),
+          ),
+        for (final r in rows) _catRow(r.key, r.value, total),
+        const SizedBox(height: 16),
+        const Divider(),
+        const SizedBox(height: 12),
+        const Text(
+          'روند ۶ ماه اخیر',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+        ),
+        const SizedBox(height: 12),
+        _trendChart(),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    final scheme = Theme.of(context).colorScheme;
     final items = _monthItems;
     final income =
         items.where((e) => e.isIncome).fold(0, (sum, e) => sum + e.amount);
@@ -321,124 +605,47 @@ class _HomePageState extends State<HomePage> {
         items.where((e) => !e.isIncome).fold(0, (sum, e) => sum + e.amount);
     final balance = income - expense;
 
+    Widget content;
+    if (!_loaded) {
+      content = const Center(child: CircularProgressIndicator());
+    } else if (_tab == 0) {
+      content = Column(
+        children: [
+          _summaryCard(income, expense, balance),
+          Expanded(child: _transactionsList(items)),
+        ],
+      );
+    } else {
+      content = _reportView(items);
+    }
+
     return Scaffold(
       appBar: AppBar(title: const Text('هزینه‌یاب')),
-      floatingActionButton: FloatingActionButton.extended(
-        onPressed: _addExpense,
-        icon: const Icon(Icons.add),
-        label: const Text('ثبت جدید'),
+      floatingActionButton: _tab == 0
+          ? FloatingActionButton.extended(
+              onPressed: _addExpense,
+              icon: const Icon(Icons.add),
+              label: const Text('ثبت جدید'),
+            )
+          : null,
+      bottomNavigationBar: NavigationBar(
+        selectedIndex: _tab,
+        onDestinationSelected: (i) => setState(() => _tab = i),
+        destinations: const [
+          NavigationDestination(
+            icon: Icon(Icons.list_alt),
+            label: 'تراکنش‌ها',
+          ),
+          NavigationDestination(
+            icon: Icon(Icons.pie_chart_outline),
+            label: 'گزارش',
+          ),
+        ],
       ),
       body: Column(
         children: [
-          // انتخاب ماه
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 8),
-            child: Row(
-              children: [
-                IconButton(
-                  icon: const Icon(Icons.chevron_right),
-                  tooltip: 'ماه قبل',
-                  onPressed: () => _shiftMonth(-1),
-                ),
-                Expanded(
-                  child: Text(
-                    '${_monthNames[_month - 1]} ${toPersianDigits('$_year')}',
-                    textAlign: TextAlign.center,
-                    style: const TextStyle(
-                      fontSize: 18,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.chevron_left),
-                  tooltip: 'ماه بعد',
-                  onPressed: _canGoNext ? () => _shiftMonth(1) : null,
-                ),
-              ],
-            ),
-          ),
-          // خلاصه ماه
-          Card(
-            margin: const EdgeInsets.fromLTRB(16, 4, 16, 8),
-            color: scheme.primaryContainer,
-            child: Padding(
-              padding: const EdgeInsets.symmetric(vertical: 16, horizontal: 8),
-              child: Row(
-                children: [
-                  _stat('درآمد', income, Colors.green.shade800),
-                  _stat('هزینه', expense, Colors.red.shade700),
-                  _stat(
-                    balance < 0 ? 'کسری' : 'مانده',
-                    balance,
-                    balance < 0 ? Colors.red.shade700 : null,
-                  ),
-                ],
-              ),
-            ),
-          ),
-          Expanded(
-            child: !_loaded
-                ? const Center(child: CircularProgressIndicator())
-                : items.isEmpty
-                    ? const Center(
-                        child: Column(
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Icon(
-                              Icons.account_balance_wallet_outlined,
-                              size: 64,
-                            ),
-                            SizedBox(height: 12),
-                            Text('در این ماه چیزی ثبت نشده'),
-                            SizedBox(height: 4),
-                            Text('با دکمه «ثبت جدید» شروع کنید'),
-                          ],
-                        ),
-                      )
-                    : ListView.builder(
-                        padding: const EdgeInsets.only(bottom: 88),
-                        itemCount: items.length,
-                        itemBuilder: (context, i) {
-                          final e = items[i];
-                          final color = e.isIncome
-                              ? Colors.green.shade800
-                              : Colors.red.shade700;
-                          return Dismissible(
-                            key: ValueKey(e.id),
-                            direction: DismissDirection.horizontal,
-                            background: Container(
-                              color: Colors.red.shade100,
-                              alignment: AlignmentDirectional.centerStart,
-                              padding:
-                                  const EdgeInsets.symmetric(horizontal: 20),
-                              child: const Icon(Icons.delete_outline),
-                            ),
-                            onDismissed: (_) => _removeExpense(e),
-                            child: ListTile(
-                              onTap: () => _editExpense(e),
-                              leading: CircleAvatar(
-                                backgroundColor: e.isIncome
-                                    ? Colors.green.shade100
-                                    : Colors.red.shade50,
-                                child: Icon(e.category.icon, color: color),
-                              ),
-                              title: Text(e.title),
-                              subtitle: Text(
-                                '${e.category.name} • ${formatJalali(e.date)}',
-                              ),
-                              trailing: Text(
-                                '${formatMoney(e.amount)} تومان',
-                                style: TextStyle(
-                                  fontWeight: FontWeight.bold,
-                                  color: color,
-                                ),
-                              ),
-                            ),
-                          );
-                        },
-                      ),
-          ),
+          _monthSelector(),
+          Expanded(child: content),
         ],
       ),
     );
