@@ -894,6 +894,7 @@ class _AddExpenseSheetState extends State<AddExpenseSheet> {
   late final TextEditingController _amountCtrl;
   late bool _isIncome;
   late int _selected;
+  late Jalali _date;
   String? _error;
 
   List<ExpenseCategory> get _cats =>
@@ -914,6 +915,7 @@ class _AddExpenseSheetState extends State<AddExpenseSheet> {
       if (idx < 0) idx = 0;
     }
     _selected = idx;
+    _date = init?.date ?? Jalali.now();
   }
 
   @override
@@ -921,6 +923,14 @@ class _AddExpenseSheetState extends State<AddExpenseSheet> {
     _titleCtrl.dispose();
     _amountCtrl.dispose();
     super.dispose();
+  }
+
+  Future<void> _pickDate() async {
+    final picked = await showDialog<Jalali>(
+      context: context,
+      builder: (_) => JalaliDatePickerDialog(initial: _date, max: Jalali.now()),
+    );
+    if (picked != null) setState(() => _date = picked);
   }
 
   void _save() {
@@ -943,7 +953,7 @@ class _AddExpenseSheetState extends State<AddExpenseSheet> {
         title: title.isEmpty ? cat.name : title,
         amount: amount,
         category: cat,
-        date: init?.date ?? Jalali.now(),
+        date: _date,
         isIncome: _isIncome,
       ),
     );
@@ -971,14 +981,6 @@ class _AddExpenseSheetState extends State<AddExpenseSheet> {
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 16),
-            if (widget.initial != null) ...[
-              Text(
-                'تاریخ: ${formatJalali(widget.initial!.date)}',
-                textAlign: TextAlign.center,
-                style: const TextStyle(fontSize: 12),
-              ),
-              const SizedBox(height: 8),
-            ],
             SegmentedButton<bool>(
               segments: const [
                 ButtonSegment(
@@ -1019,6 +1021,12 @@ class _AddExpenseSheetState extends State<AddExpenseSheet> {
                 labelText: 'عنوان (اختیاری)',
                 border: OutlineInputBorder(),
               ),
+            ),
+            const SizedBox(height: 12),
+            OutlinedButton.icon(
+              onPressed: _pickDate,
+              icon: const Icon(Icons.calendar_today, size: 18),
+              label: Text('تاریخ: ${formatJalali(_date)}'),
             ),
             const SizedBox(height: 16),
             Wrap(
@@ -1484,6 +1492,187 @@ class SmsCenterPage extends StatelessWidget {
           ),
         );
       },
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// انتخاب تاریخ شمسی
+// ---------------------------------------------------------------------------
+
+int _dateKey(Jalali d) => d.year * 10000 + d.month * 100 + d.day;
+
+int _jalaliMonthLength(int y, int m) {
+  if (m <= 6) return 31;
+  if (m <= 11) return 30;
+  // اسفند: ۲۹ یا ۳۰ روز (سال کبیسه)
+  final a = Jalali(y, 12, 1).toGregorian();
+  final b = Jalali(y + 1, 1, 1).toGregorian();
+  return DateTime.utc(b.year, b.month, b.day)
+      .difference(DateTime.utc(a.year, a.month, a.day))
+      .inDays;
+}
+
+// جای اولین روز ماه در هفته: شنبه = ۰ ... جمعه = ۶
+int _firstDayOffset(int y, int m) {
+  final g = Jalali(y, m, 1).toGregorian();
+  final wd = DateTime.utc(g.year, g.month, g.day).weekday; // دوشنبه=۱ ... یکشنبه=۷
+  return (wd + 1) % 7;
+}
+
+class JalaliDatePickerDialog extends StatefulWidget {
+  final Jalali initial;
+  final Jalali max;
+  const JalaliDatePickerDialog({
+    super.key,
+    required this.initial,
+    required this.max,
+  });
+
+  @override
+  State<JalaliDatePickerDialog> createState() => _JalaliDatePickerDialogState();
+}
+
+class _JalaliDatePickerDialogState extends State<JalaliDatePickerDialog> {
+  late int _y;
+  late int _m;
+  late Jalali _selected;
+
+  static const _weekHeaders = ['ش', 'ی', 'د', 'س', 'چ', 'پ', 'ج'];
+
+  @override
+  void initState() {
+    super.initState();
+    _selected = _dateKey(widget.initial) > _dateKey(widget.max)
+        ? widget.max
+        : widget.initial;
+    _y = _selected.year;
+    _m = _selected.month;
+  }
+
+  bool get _canGoNext =>
+      _y < widget.max.year || (_y == widget.max.year && _m < widget.max.month);
+
+  bool get _canGoPrev => _y > 1380 || (_y == 1380 && _m > 1);
+
+  void _shift(int delta) {
+    var m = _m + delta;
+    var y = _y;
+    if (m > 12) {
+      m = 1;
+      y++;
+    } else if (m < 1) {
+      m = 12;
+      y--;
+    }
+    setState(() {
+      _y = y;
+      _m = m;
+    });
+  }
+
+  Widget _dayCell(int d) {
+    final scheme = Theme.of(context).colorScheme;
+    final date = Jalali(_y, _m, d);
+    final disabled = _dateKey(date) > _dateKey(widget.max);
+    final selected = _dateKey(date) == _dateKey(_selected);
+    return Center(
+      child: GestureDetector(
+        onTap: disabled ? null : () => setState(() => _selected = date),
+        child: Container(
+          width: 34,
+          height: 34,
+          alignment: Alignment.center,
+          decoration: BoxDecoration(
+            shape: BoxShape.circle,
+            color: selected ? scheme.primary : null,
+          ),
+          child: Text(
+            toPersianDigits('$d'),
+            style: TextStyle(
+              color: selected
+                  ? scheme.onPrimary
+                  : (disabled ? Theme.of(context).disabledColor : null),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final offset = _firstDayOffset(_y, _m);
+    final length = _jalaliMonthLength(_y, _m);
+    return AlertDialog(
+      contentPadding: const EdgeInsets.fromLTRB(12, 8, 12, 0),
+      title: Row(
+        children: [
+          IconButton(
+            icon: const Icon(Icons.chevron_right),
+            tooltip: 'ماه قبل',
+            onPressed: _canGoPrev ? () => _shift(-1) : null,
+          ),
+          Expanded(
+            child: Text(
+              '${_monthNames[_m - 1]} ${toPersianDigits('$_y')}',
+              textAlign: TextAlign.center,
+              style: const TextStyle(fontSize: 18),
+            ),
+          ),
+          IconButton(
+            icon: const Icon(Icons.chevron_left),
+            tooltip: 'ماه بعد',
+            onPressed: _canGoNext ? () => _shift(1) : null,
+          ),
+        ],
+      ),
+      content: SizedBox(
+        width: double.maxFinite,
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Row(
+              children: [
+                for (final h in _weekHeaders)
+                  Expanded(
+                    child: Center(
+                      child: Text(h, style: const TextStyle(fontSize: 12)),
+                    ),
+                  ),
+              ],
+            ),
+            const SizedBox(height: 4),
+            GridView.count(
+              crossAxisCount: 7,
+              shrinkWrap: true,
+              physics: const NeverScrollableScrollPhysics(),
+              children: [
+                for (var i = 0; i < offset; i++) const SizedBox.shrink(),
+                for (var d = 1; d <= length; d++) _dayCell(d),
+              ],
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => setState(() {
+            _selected = widget.max;
+            _y = widget.max.year;
+            _m = widget.max.month;
+          }),
+          child: const Text('امروز'),
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('انصراف'),
+        ),
+        FilledButton(
+          onPressed: () => Navigator.pop(context, _selected),
+          child: const Text('تأیید'),
+        ),
+      ],
     );
   }
 }
