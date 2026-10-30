@@ -1,6 +1,7 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:shamsi_date/shamsi_date.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 
@@ -56,6 +57,140 @@ const _monthNames = [
 
 String formatJalali(Jalali j) =>
     toPersianDigits('${j.day} ${_monthNames[j.month - 1]} ${j.year}');
+
+// ---------------------------------------------------------------------------
+// تشخیص پیامک بانکی
+// ---------------------------------------------------------------------------
+
+String _normalizeSms(String t) {
+  return toEnglishDigits(t)
+      .replaceAll('ي', 'ی')
+      .replaceAll('ك', 'ک')
+      .replaceAll('٬', ',');
+}
+
+Jalali? _safeJalali(int y, int m, int d) {
+  if (y < 1300 || y > 1500 || m < 1 || m > 12 || d < 1) return null;
+  final maxDay = m <= 6 ? 31 : (m <= 11 ? 30 : 29);
+  if (d > maxDay) return null;
+  return Jalali(y, m, d);
+}
+
+// پیامک‌هایی که سال ندارند: اگر تاریخ از امروز جلوتر باشد، مال سال قبل است
+int _inferYear(int month, int day) {
+  final now = Jalali.now();
+  if (month > now.month || (month == now.month && day > now.day)) {
+    return now.year - 1;
+  }
+  return now.year;
+}
+
+const _bankNames = [
+  'گردشگری',
+  'ملی',
+  'ملت',
+  'پارسیان',
+  'صادرات',
+  'سپه',
+  'تجارت',
+  'رفاه',
+  'پاسارگاد',
+  'سامان',
+  'کشاورزی',
+  'مسکن',
+  'شهر',
+  'آینده',
+  'اقتصاد نوین',
+  'سینا',
+  'سرمایه',
+  'قوامین',
+  'ایران زمین',
+  'دی',
+];
+
+String _smsTitle(String t, bool isIncome) {
+  final base = isIncome
+      ? 'واریز به حساب'
+      : (t.contains('خرید') ? 'خرید با کارت' : 'برداشت از حساب');
+  for (final b in _bankNames) {
+    if (t.contains('بانک $b')) return '$base (بانک $b)';
+  }
+  return base;
+}
+
+/// متن پیامک بانکی را می‌خواند و یک تراکنش پیشنهادی برمی‌گرداند.
+/// اگر مبلغی پیدا نشود null برمی‌گرداند.
+Expense? parseBankSms(String raw) {
+  final t = _normalizeSms(raw);
+
+  // ---- مبلغ ----
+  RegExpMatch? m =
+      RegExp(r'مبلغ\s*:?\s*(\d[\d,]*)\s*([+\-])?').firstMatch(t);
+  m ??= RegExp(r'(?:برداشت|واریز|پرداخت|خرید)\s*:\s*(\d[\d,]*)\s*([+\-])?')
+      .firstMatch(t);
+  if (m == null) return null;
+
+  final value = int.tryParse(m.group(1)!.replaceAll(',', ''));
+  if (value == null) return null;
+  // مبلغ پیامک‌ها معمولاً ریال است
+  final amount = t.contains('تومان') ? value : value ~/ 10;
+  if (amount <= 0) return null;
+
+  // ---- جهت تراکنش ----
+  final sign = m.group(2);
+  final bool isIncome;
+  if (sign == '+') {
+    isIncome = true;
+  } else if (sign == '-') {
+    isIncome = false;
+  } else if (t.contains('برداشت')) {
+    isIncome = false;
+  } else if (t.contains('واریز')) {
+    isIncome = true;
+  } else {
+    isIncome = false;
+  }
+
+  // ---- تاریخ ----
+  Jalali? date;
+  final full = RegExp(r'(\d{4})/(\d{1,2})/(\d{1,2})').firstMatch(t);
+  if (full != null) {
+    date = _safeJalali(
+      int.parse(full.group(1)!),
+      int.parse(full.group(2)!),
+      int.parse(full.group(3)!),
+    );
+  } else {
+    final short3 = RegExp(r'(\d{2})/(\d{1,2})/(\d{1,2})').firstMatch(t);
+    if (short3 != null) {
+      date = _safeJalali(
+        1400 + int.parse(short3.group(1)!),
+        int.parse(short3.group(2)!),
+        int.parse(short3.group(3)!),
+      );
+    } else {
+      final md = RegExp(r'(\d{1,2})/(\d{1,2})').firstMatch(t);
+      final packed = RegExp(r'(?:^|\s)(\d{2})(\d{2})\s*-\s*\d{1,2}:\d{2}')
+          .firstMatch(t);
+      final hit = md ?? packed;
+      if (hit != null) {
+        final mo = int.parse(hit.group(1)!);
+        final da = int.parse(hit.group(2)!);
+        date = _safeJalali(_inferYear(mo, da), mo, da);
+      }
+    }
+  }
+  date ??= Jalali.now();
+
+  return Expense(
+    id: DateTime.now().microsecondsSinceEpoch,
+    title: _smsTitle(t, isIncome),
+    amount: amount,
+    category: findCategory('سایر', isIncome),
+    date: date,
+    isIncome: isIncome,
+  );
+}
 
 // ---------------------------------------------------------------------------
 // مدل‌ها
@@ -235,15 +370,26 @@ class _HomePageState extends State<HomePage> {
 
   // ---- افزودن / ویرایش / حذف ----
 
-  Future<void> _addExpense() async {
+  Future<void> _importSms() async {
+    final parsed = await showDialog<Expense>(
+      context: context,
+      builder: (_) => const SmsPasteDialog(),
+    );
+    if (parsed != null && mounted) {
+      await _addExpense(prefill: parsed);
+    }
+  }
+
+  Future<void> _addExpense({Expense? prefill}) async {
     final result = await showModalBottomSheet<Expense>(
       context: context,
       isScrollControlled: true,
       showDragHandle: true,
-      builder: (_) => const AddExpenseSheet(),
+      builder: (_) => AddExpenseSheet(initial: prefill, isNew: prefill != null),
     );
     if (result != null) {
       setState(() {
+        _tab = 0;
         _expenses.insert(0, result);
         // نمایش ماهی که تراکنش در آن ثبت شده
         _year = result.date.year;
@@ -620,10 +766,19 @@ class _HomePageState extends State<HomePage> {
     }
 
     return Scaffold(
-      appBar: AppBar(title: const Text('هزینه‌یاب')),
+      appBar: AppBar(
+        title: const Text('هزینه‌یاب'),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.sms_outlined),
+            tooltip: 'ثبت از پیامک بانکی',
+            onPressed: _importSms,
+          ),
+        ],
+      ),
       floatingActionButton: _tab == 0
           ? FloatingActionButton.extended(
-              onPressed: _addExpense,
+              onPressed: () => _addExpense(),
               icon: const Icon(Icons.add),
               label: const Text('ثبت جدید'),
             )
@@ -658,7 +813,8 @@ class _HomePageState extends State<HomePage> {
 
 class AddExpenseSheet extends StatefulWidget {
   final Expense? initial;
-  const AddExpenseSheet({super.key, this.initial});
+  final bool isNew; // true یعنی مقدار اولیه از پیامک آمده و هنوز ثبت نشده
+  const AddExpenseSheet({super.key, this.initial, this.isNew = false});
 
   @override
   State<AddExpenseSheet> createState() => _AddExpenseSheetState();
@@ -712,7 +868,9 @@ class _AddExpenseSheetState extends State<AddExpenseSheet> {
     Navigator.pop(
       context,
       Expense(
-        id: init?.id ?? DateTime.now().microsecondsSinceEpoch,
+        id: (init != null && !widget.isNew)
+            ? init.id
+            : DateTime.now().microsecondsSinceEpoch,
         title: title.isEmpty ? cat.name : title,
         amount: amount,
         category: cat,
@@ -724,7 +882,7 @@ class _AddExpenseSheetState extends State<AddExpenseSheet> {
 
   @override
   Widget build(BuildContext context) {
-    final editing = widget.initial != null;
+    final editing = widget.initial != null && !widget.isNew;
     final cats = _cats;
     return Padding(
       padding: EdgeInsets.fromLTRB(
@@ -744,6 +902,14 @@ class _AddExpenseSheetState extends State<AddExpenseSheet> {
               style: const TextStyle(fontSize: 18, fontWeight: FontWeight.bold),
             ),
             const SizedBox(height: 16),
+            if (widget.initial != null) ...[
+              Text(
+                'تاریخ: ${formatJalali(widget.initial!.date)}',
+                textAlign: TextAlign.center,
+                style: const TextStyle(fontSize: 12),
+              ),
+              const SizedBox(height: 8),
+            ],
             SegmentedButton<bool>(
               segments: const [
                 ButtonSegment(
@@ -807,6 +973,90 @@ class _AddExpenseSheetState extends State<AddExpenseSheet> {
           ],
         ),
       ),
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// پنجره چسباندن پیامک بانکی
+// ---------------------------------------------------------------------------
+
+class SmsPasteDialog extends StatefulWidget {
+  const SmsPasteDialog({super.key});
+
+  @override
+  State<SmsPasteDialog> createState() => _SmsPasteDialogState();
+}
+
+class _SmsPasteDialogState extends State<SmsPasteDialog> {
+  final _ctrl = TextEditingController();
+  String? _error;
+
+  @override
+  void dispose() {
+    _ctrl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _paste() async {
+    final data = await Clipboard.getData(Clipboard.kTextPlain);
+    final text = data?.text;
+    if (text != null && text.isNotEmpty) {
+      setState(() {
+        _ctrl.text = text;
+        _error = null;
+      });
+    }
+  }
+
+  void _parse() {
+    final result = parseBankSms(_ctrl.text);
+    if (result == null) {
+      setState(() => _error = 'مبلغ در متن پیدا نشد. کل متن پیامک را کپی کنید.');
+      return;
+    }
+    Navigator.pop(context, result);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('ثبت از پیامک بانکی'),
+      content: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          TextField(
+            controller: _ctrl,
+            minLines: 4,
+            maxLines: 6,
+            decoration: InputDecoration(
+              hintText: 'متن پیامک بانکی را اینجا بچسبانید',
+              errorText: _error,
+              border: const OutlineInputBorder(),
+            ),
+            onChanged: (_) {
+              if (_error != null) setState(() => _error = null);
+            },
+          ),
+          const SizedBox(height: 8),
+          Align(
+            alignment: AlignmentDirectional.centerStart,
+            child: TextButton.icon(
+              onPressed: _paste,
+              icon: const Icon(Icons.content_paste),
+              label: const Text('چسباندن از کلیپ‌بورد'),
+            ),
+          ),
+        ],
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('انصراف'),
+        ),
+        FilledButton(onPressed: _parse, child: const Text('تشخیص')),
+      ],
     );
   }
 }
