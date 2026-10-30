@@ -1,5 +1,8 @@
+import 'dart:convert';
+
 import 'package:flutter/material.dart';
 import 'package:shamsi_date/shamsi_date.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const MyApp());
 
@@ -88,6 +91,31 @@ class Expense {
     required this.category,
     required this.date,
   });
+
+  Map<String, dynamic> toJson() => {
+        'id': id,
+        'title': title,
+        'amount': amount,
+        'category': category.name,
+        'y': date.year,
+        'm': date.month,
+        'd': date.day,
+      };
+
+  factory Expense.fromJson(Map<String, dynamic> json) {
+    final catName = json['category'] as String;
+    final cat = categories.firstWhere(
+      (c) => c.name == catName,
+      orElse: () => categories.last,
+    );
+    return Expense(
+      id: json['id'] as int,
+      title: json['title'] as String,
+      amount: json['amount'] as int,
+      category: cat,
+      date: Jalali(json['y'] as int, json['m'] as int, json['d'] as int),
+    );
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -119,6 +147,41 @@ class HomePage extends StatefulWidget {
 
 class _HomePageState extends State<HomePage> {
   final List<Expense> _expenses = [];
+  bool _loaded = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      final raw = prefs.getString('expenses');
+      if (raw != null) {
+        final list = (jsonDecode(raw) as List)
+            .map((e) => Expense.fromJson(e as Map<String, dynamic>))
+            .toList();
+        _expenses
+          ..clear()
+          ..addAll(list);
+      }
+    } catch (_) {
+      // اگر داده خراب بود، با لیست خالی شروع می‌کنیم
+    }
+    if (mounted) setState(() => _loaded = true);
+  }
+
+  Future<void> _save() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setString(
+        'expenses',
+        jsonEncode(_expenses.map((e) => e.toJson()).toList()),
+      );
+    } catch (_) {}
+  }
 
   int get _total => _expenses.fold(0, (sum, e) => sum + e.amount);
 
@@ -138,12 +201,14 @@ class _HomePageState extends State<HomePage> {
     );
     if (result != null) {
       setState(() => _expenses.insert(0, result));
+      _save();
     }
   }
 
   void _removeExpense(int index) {
     final removed = _expenses[index];
     setState(() => _expenses.removeAt(index));
+    _save();
     ScaffoldMessenger.of(context)
       ..clearSnackBars()
       ..showSnackBar(
@@ -151,7 +216,10 @@ class _HomePageState extends State<HomePage> {
           content: const Text('هزینه حذف شد'),
           action: SnackBarAction(
             label: 'بازگرداندن',
-            onPressed: () => setState(() => _expenses.insert(index, removed)),
+            onPressed: () {
+              setState(() => _expenses.insert(index, removed));
+              _save();
+            },
           ),
         ),
       );
@@ -206,7 +274,9 @@ class _HomePageState extends State<HomePage> {
             ),
           ),
           Expanded(
-            child: _expenses.isEmpty
+            child: !_loaded
+                ? const Center(child: CircularProgressIndicator())
+                : _expenses.isEmpty
                 ? const Center(
                     child: Column(
                       mainAxisSize: MainAxisSize.min,
