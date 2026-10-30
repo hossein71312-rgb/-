@@ -7,6 +7,16 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 void main() => runApp(const MyApp());
 
+int _lastId = 0;
+
+/// شناسه یکتا برای هر تراکنش (حتی اگر چند تا پشت سر هم ساخته بشن)
+int newExpenseId() {
+  var id = DateTime.now().microsecondsSinceEpoch;
+  if (id <= _lastId) id = _lastId + 1;
+  _lastId = id;
+  return id;
+}
+
 // ---------------------------------------------------------------------------
 // ابزارهای کمکی: اعداد فارسی، جداکننده هزارگان، تاریخ شمسی
 // ---------------------------------------------------------------------------
@@ -120,8 +130,15 @@ String _smsTitle(String t, bool isIncome) {
 
 /// متن پیامک بانکی را می‌خواند و یک تراکنش پیشنهادی برمی‌گرداند.
 /// اگر مبلغی پیدا نشود null برمی‌گرداند.
-Expense? parseBankSms(String raw) {
+Expense? parseBankSms(String raw, {bool requireBalance = false}) {
   final t = _normalizeSms(raw);
+
+  // در خواندن خودکار فقط پیامی را می‌پذیریم که مانده/موجودی دارد
+  // و رمز یکبار مصرف نیست، تا پیامک‌های غیر تراکنش اشتباه ثبت نشن
+  if (requireBalance) {
+    final hasBalance = t.contains('مانده') || t.contains('موجودی');
+    if (!hasBalance || t.contains('رمز')) return null;
+  }
 
   // ---- مبلغ ----
   RegExpMatch? m =
@@ -183,7 +200,7 @@ Expense? parseBankSms(String raw) {
   date ??= Jalali.now();
 
   return Expense(
-    id: DateTime.now().microsecondsSinceEpoch,
+    id: newExpenseId(),
     title: _smsTitle(t, isIncome),
     amount: amount,
     category: findCategory('سایر', isIncome),
@@ -292,8 +309,9 @@ class HomePage extends StatefulWidget {
   State<HomePage> createState() => _HomePageState();
 }
 
-class _HomePageState extends State<HomePage> {
+class _HomePageState extends State<HomePage> with WidgetsBindingObserver {
   final List<Expense> _expenses = [];
+  final SmsController _sms = SmsController();
   bool _loaded = false;
   late int _year;
   late int _month;
@@ -305,7 +323,26 @@ class _HomePageState extends State<HomePage> {
     final now = Jalali.now();
     _year = now.year;
     _month = now.month;
+    WidgetsBinding.instance.addObserver(this);
+    _sms.addListener(() {
+      if (mounted) setState(() {});
+    });
     _load();
+    _sms.init();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    _sms.dispose();
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      _sms.scan();
+    }
   }
 
   Future<void> _load() async {
@@ -387,16 +424,44 @@ class _HomePageState extends State<HomePage> {
       showDragHandle: true,
       builder: (_) => AddExpenseSheet(initial: prefill, isNew: prefill != null),
     );
-    if (result != null) {
-      setState(() {
-        _tab = 0;
-        _expenses.insert(0, result);
-        // نمایش ماهی که تراکنش در آن ثبت شده
-        _year = result.date.year;
-        _month = result.date.month;
-      });
-      _save();
-    }
+    if (result != null) _insertExpense(result);
+  }
+
+  void _insertExpense(Expense result) {
+    setState(() {
+      _tab = 0;
+      _expenses.insert(0, result);
+      // نمایش ماهی که تراکنش در آن ثبت شده
+      _year = result.date.year;
+      _month = result.date.month;
+    });
+    _save();
+  }
+
+  /// پیشنهاد پیامک را در فرم باز می‌کند تا کاربر بررسی و ثبت کند
+  Future<bool> _reviewSms(Expense suggestion) async {
+    final result = await showModalBottomSheet<Expense>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (_) => AddExpenseSheet(initial: suggestion, isNew: true),
+    );
+    if (result == null) return false;
+    _insertExpense(result);
+    return true;
+  }
+
+  void _openSmsCenter() {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => SmsCenterPage(
+          controller: _sms,
+          onAdd: _insertExpense,
+          onReview: _reviewSms,
+          onPaste: _importSms,
+        ),
+      ),
+    );
   }
 
   Future<void> _editExpense(Expense old) async {
@@ -770,9 +835,13 @@ class _HomePageState extends State<HomePage> {
         title: const Text('هزینه‌یاب'),
         actions: [
           IconButton(
-            icon: const Icon(Icons.sms_outlined),
-            tooltip: 'ثبت از پیامک بانکی',
-            onPressed: _importSms,
+            icon: Badge(
+              isLabelVisible: _sms.pending.isNotEmpty,
+              label: Text(toPersianDigits('${_sms.pending.length}')),
+              child: const Icon(Icons.sms_outlined),
+            ),
+            tooltip: 'پیامک بانکی',
+            onPressed: _openSmsCenter,
           ),
         ],
       ),
@@ -870,7 +939,7 @@ class _AddExpenseSheetState extends State<AddExpenseSheet> {
       Expense(
         id: (init != null && !widget.isNew)
             ? init.id
-            : DateTime.now().microsecondsSinceEpoch,
+            : newExpenseId(),
         title: title.isEmpty ? cat.name : title,
         amount: amount,
         category: cat,
@@ -1057,6 +1126,364 @@ class _SmsPasteDialogState extends State<SmsPasteDialog> {
         ),
         FilledButton(onPressed: _parse, child: const Text('تشخیص')),
       ],
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// خواندن خودکار پیامک‌ها
+// ---------------------------------------------------------------------------
+
+class PendingSms {
+  final String key; // شناسه پیامک: «id:date»
+  final Expense expense;
+  const PendingSms(this.key, this.expense);
+}
+
+class SmsController extends ChangeNotifier {
+  static const _channel = MethodChannel('expense_tracker/sms');
+
+  bool enabled = false;
+  bool scanning = false;
+  String? error;
+  final List<PendingSms> pending = [];
+  final Set<String> _handled = {};
+
+  Future<void> init() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      enabled = prefs.getBool('sms_enabled') ?? false;
+      _handled
+        ..clear()
+        ..addAll(prefs.getStringList('sms_handled') ?? const <String>[]);
+    } catch (_) {}
+    notifyListeners();
+    if (enabled) await scan();
+  }
+
+  Future<void> _persist() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      await prefs.setBool('sms_enabled', enabled);
+      var list = _handled.toList();
+      if (list.length > 1500) list = list.sublist(list.length - 1500);
+      await prefs.setStringList('sms_handled', list);
+    } catch (_) {}
+  }
+
+  Future<bool> enable() async {
+    var ok = false;
+    try {
+      ok = await _channel.invokeMethod<bool>('requestPermission') ?? false;
+    } catch (_) {
+      error = 'خواندن پیامک روی این دستگاه ممکن نشد.';
+      notifyListeners();
+      return false;
+    }
+    if (!ok) {
+      error = 'مجوز پیامک داده نشد. از تنظیمات گوشی، بخش برنامه‌ها، '
+          'هزینه‌یاب، مجوزها، پیامک را فعال کنید.';
+      notifyListeners();
+      return false;
+    }
+    enabled = true;
+    error = null;
+    await _persist();
+    notifyListeners();
+    await scan();
+    return true;
+  }
+
+  Future<void> disable() async {
+    enabled = false;
+    error = null;
+    pending.clear();
+    await _persist();
+    notifyListeners();
+  }
+
+  Future<void> scan() async {
+    if (!enabled || scanning) return;
+    scanning = true;
+    error = null;
+    notifyListeners();
+    try {
+      final has = await _channel.invokeMethod<bool>('hasPermission') ?? false;
+      if (!has) {
+        error = 'مجوز خواندن پیامک داده نشده است.';
+      } else {
+        final since = DateTime.now()
+            .subtract(const Duration(days: 30))
+            .millisecondsSinceEpoch;
+        final raw = await _channel.invokeMethod<List<dynamic>>(
+          'readInbox',
+          {'sinceMs': since, 'limit': 300},
+        );
+        final found = <PendingSms>[];
+        for (final item in raw ?? const <dynamic>[]) {
+          final m = Map<String, dynamic>.from(item as Map);
+          final key = '${m['id']}:${m['date']}';
+          if (_handled.contains(key)) continue;
+          final parsed = parseBankSms(
+            (m['body'] ?? '').toString(),
+            requireBalance: true,
+          );
+          if (parsed == null) continue;
+          // تاریخ دریافت پیامک دقیق‌تر از تاریخ داخل متن است
+          var date = parsed.date;
+          final ms = (m['date'] as num?)?.toInt();
+          if (ms != null) {
+            final dt = DateTime.fromMillisecondsSinceEpoch(ms);
+            date = Gregorian(dt.year, dt.month, dt.day).toJalali();
+          }
+          found.add(
+            PendingSms(
+              key,
+              Expense(
+                id: parsed.id,
+                title: parsed.title,
+                amount: parsed.amount,
+                category: parsed.category,
+                date: date,
+                isIncome: parsed.isIncome,
+              ),
+            ),
+          );
+        }
+        pending
+          ..clear()
+          ..addAll(found);
+      }
+    } catch (_) {
+      error = 'خواندن پیامک‌ها انجام نشد.';
+    }
+    scanning = false;
+    notifyListeners();
+  }
+
+  /// پیشنهاد ثبت یا رد شده؛ دیگر نشان داده نمی‌شود
+  void markHandled(PendingSms p) {
+    _handled.add(p.key);
+    pending.removeWhere((x) => x.key == p.key);
+    _persist();
+    notifyListeners();
+  }
+}
+
+class SmsCenterPage extends StatelessWidget {
+  final SmsController controller;
+  final void Function(Expense) onAdd;
+  final Future<bool> Function(Expense) onReview;
+  final Future<void> Function() onPaste;
+
+  const SmsCenterPage({
+    super.key,
+    required this.controller,
+    required this.onAdd,
+    required this.onReview,
+    required this.onPaste,
+  });
+
+  Future<void> _enable(BuildContext context) async {
+    final ok = await controller.enable();
+    if (!ok && context.mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        SnackBar(
+          content: Text(controller.error ?? 'مجوز داده نشد'),
+          duration: const Duration(seconds: 8),
+        ),
+      );
+    }
+  }
+
+  Widget _enableCard(BuildContext context) {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.all(16),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Row(
+              children: [
+                Icon(Icons.lock_outline, size: 20),
+                SizedBox(width: 8),
+                Text(
+                  'خواندن خودکار پیامک‌ها',
+                  style: TextStyle(fontWeight: FontWeight.bold),
+                ),
+              ],
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'با فعال کردن این گزینه، پیامک‌های بانکی شما خوانده می‌شن و به‌صورت '
+              'پیشنهاد ثبت هزینه یا درآمد نشون داده می‌شن. هیچ موردی بدون '
+              'تأیید شما ثبت نمی‌شه.',
+            ),
+            const SizedBox(height: 8),
+            const Text(
+              'همه‌ی پردازش فقط روی خود گوشی انجام می‌شه و هیچ پیامکی به جایی '
+              'فرستاده نمی‌شه.',
+              style: TextStyle(fontSize: 12),
+            ),
+            const SizedBox(height: 12),
+            FilledButton.icon(
+              onPressed: () => _enable(context),
+              icon: const Icon(Icons.sms),
+              label: const Text('فعال‌سازی'),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _statusCard() {
+    return Card(
+      child: Padding(
+        padding: const EdgeInsets.fromLTRB(16, 8, 8, 8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(Icons.check_circle, color: Colors.green.shade700),
+                const SizedBox(width: 8),
+                const Expanded(child: Text('خواندن پیامک فعال است')),
+                TextButton(
+                  onPressed: controller.disable,
+                  child: const Text('غیرفعال‌سازی'),
+                ),
+              ],
+            ),
+            if (controller.error != null)
+              Padding(
+                padding: const EdgeInsets.only(bottom: 8, left: 8),
+                child: Text(
+                  controller.error!,
+                  style: TextStyle(color: Colors.red.shade700, fontSize: 12),
+                ),
+              ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _pendingTile(PendingSms p) {
+    final e = p.expense;
+    final color = e.isIncome ? Colors.green.shade800 : Colors.red.shade700;
+    return Card(
+      child: ListTile(
+        onTap: () async {
+          final added = await onReview(e);
+          if (added) controller.markHandled(p);
+        },
+        leading: CircleAvatar(
+          backgroundColor:
+              e.isIncome ? Colors.green.shade100 : Colors.red.shade50,
+          child: Icon(e.category.icon, color: color),
+        ),
+        title: Text(e.title),
+        subtitle: Text(
+          '${formatMoney(e.amount)} تومان • ${formatJalali(e.date)}',
+          style: TextStyle(color: color),
+        ),
+        trailing: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            IconButton(
+              icon: const Icon(Icons.check_circle_outline),
+              tooltip: 'ثبت',
+              onPressed: () {
+                onAdd(e);
+                controller.markHandled(p);
+              },
+            ),
+            IconButton(
+              icon: const Icon(Icons.close),
+              tooltip: 'نادیده گرفتن',
+              onPressed: () => controller.markHandled(p),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: controller,
+      builder: (context, _) {
+        final pending = controller.pending;
+        return Scaffold(
+          appBar: AppBar(
+            title: const Text('پیامک بانکی'),
+            actions: [
+              if (controller.enabled)
+                IconButton(
+                  icon: const Icon(Icons.refresh),
+                  tooltip: 'بررسی دوباره',
+                  onPressed: controller.scanning ? null : controller.scan,
+                ),
+            ],
+          ),
+          body: ListView(
+            padding: const EdgeInsets.all(16),
+            children: [
+              if (controller.enabled) _statusCard() else _enableCard(context),
+              if (controller.scanning)
+                const Padding(
+                  padding: EdgeInsets.symmetric(vertical: 8),
+                  child: LinearProgressIndicator(),
+                ),
+              if (controller.enabled) ...[
+                const SizedBox(height: 16),
+                Text(
+                  'پیشنهادهای در انتظار تأیید '
+                  '(${toPersianDigits('${pending.length}')})',
+                  style: const TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+                const SizedBox(height: 8),
+                if (pending.isEmpty && !controller.scanning)
+                  const Padding(
+                    padding: EdgeInsets.symmetric(vertical: 16),
+                    child: Center(
+                      child: Text('پیامک بانکی جدیدی در ۳۰ روز اخیر پیدا نشد'),
+                    ),
+                  ),
+                for (final p in pending) _pendingTile(p),
+                if (pending.length > 1)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: OutlinedButton(
+                      onPressed: () {
+                        for (final p in List<PendingSms>.of(pending)) {
+                          onAdd(p.expense);
+                          controller.markHandled(p);
+                        }
+                      },
+                      child: const Text('ثبت همه'),
+                    ),
+                  ),
+              ],
+              const SizedBox(height: 16),
+              const Divider(),
+              ListTile(
+                leading: const Icon(Icons.content_paste),
+                title: const Text('چسباندن متن پیامک'),
+                subtitle: const Text(
+                  'برای پیامک بانک‌هایی که خودکار تشخیص داده نمی‌شن',
+                ),
+                onTap: () => onPaste(),
+              ),
+            ],
+          ),
+        );
+      },
     );
   }
 }

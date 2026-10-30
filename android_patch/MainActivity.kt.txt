@@ -1,0 +1,107 @@
+import android.Manifest
+import android.content.pm.PackageManager
+import android.net.Uri
+import android.os.Build
+import io.flutter.embedding.android.FlutterActivity
+import io.flutter.embedding.engine.FlutterEngine
+import io.flutter.plugin.common.MethodChannel
+
+class MainActivity : FlutterActivity() {
+    private val channelName = "expense_tracker/sms"
+    private val smsRequestCode = 4412
+    private var pendingResult: MethodChannel.Result? = null
+
+    override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
+        super.configureFlutterEngine(flutterEngine)
+        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, channelName)
+            .setMethodCallHandler { call, result ->
+                when (call.method) {
+                    "hasPermission" -> result.success(hasSmsPermission())
+
+                    "requestPermission" -> {
+                        if (hasSmsPermission()) {
+                            result.success(true)
+                        } else if (pendingResult != null) {
+                            result.error("busy", "درخواست قبلی هنوز تمام نشده", null)
+                        } else if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+                            pendingResult = result
+                            requestPermissions(
+                                arrayOf(Manifest.permission.READ_SMS),
+                                smsRequestCode
+                            )
+                        } else {
+                            result.success(true)
+                        }
+                    }
+
+                    "readInbox" -> {
+                        if (!hasSmsPermission()) {
+                            result.error("denied", "مجوز پیامک داده نشده", null)
+                        } else {
+                            val sinceMs = call.argument<Number>("sinceMs")?.toLong() ?: 0L
+                            val limit = call.argument<Number>("limit")?.toInt() ?: 200
+                            Thread {
+                                try {
+                                    val list = readInbox(sinceMs, limit)
+                                    runOnUiThread { result.success(list) }
+                                } catch (e: Exception) {
+                                    runOnUiThread { result.error("read_failed", e.message, null) }
+                                }
+                            }.start()
+                        }
+                    }
+
+                    else -> result.notImplemented()
+                }
+            }
+    }
+
+    private fun hasSmsPermission(): Boolean {
+        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) return true
+        return checkSelfPermission(Manifest.permission.READ_SMS) ==
+            PackageManager.PERMISSION_GRANTED
+    }
+
+    override fun onRequestPermissionsResult(
+        requestCode: Int,
+        permissions: Array<out String>,
+        grantResults: IntArray
+    ) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode == smsRequestCode) {
+            val granted = grantResults.isNotEmpty() &&
+                grantResults[0] == PackageManager.PERMISSION_GRANTED
+            pendingResult?.success(granted)
+            pendingResult = null
+        }
+    }
+
+    private fun readInbox(sinceMs: Long, limit: Int): List<Map<String, Any?>> {
+        val out = ArrayList<Map<String, Any?>>()
+        val cursor = contentResolver.query(
+            Uri.parse("content://sms/inbox"),
+            arrayOf("_id", "address", "body", "date"),
+            "date > ?",
+            arrayOf(sinceMs.toString()),
+            "date DESC"
+        ) ?: return out
+
+        cursor.use { c ->
+            val idIdx = c.getColumnIndex("_id")
+            val addrIdx = c.getColumnIndex("address")
+            val bodyIdx = c.getColumnIndex("body")
+            val dateIdx = c.getColumnIndex("date")
+            while (c.moveToNext() && out.size < limit) {
+                out.add(
+                    mapOf(
+                        "id" to c.getLong(idIdx),
+                        "address" to c.getString(addrIdx),
+                        "body" to c.getString(bodyIdx),
+                        "date" to c.getLong(dateIdx)
+                    )
+                )
+            }
+        }
+        return out
+    }
+}
