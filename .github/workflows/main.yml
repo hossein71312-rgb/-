@@ -23,6 +23,17 @@ jobs:
       - name: Generate Android project files
         run: flutter create --platforms=android --org com.example .
 
+      - name: Add SMS support (Android native code and permission)
+        run: |
+          MAIN=$(find android/app/src/main -name MainActivity.kt | head -n 1)
+          test -n "$MAIN" || { echo "MainActivity.kt not found"; exit 1; }
+          echo "Patching $MAIN"
+          PKG=$(grep -m1 '^package ' "$MAIN")
+          { echo "$PKG"; echo; cat android_patch/MainActivity.kt.txt; } > "$MAIN"
+          MANIFEST=android/app/src/main/AndroidManifest.xml
+          sed -i 's|<application|<uses-permission android:name="android.permission.READ_SMS" />\n    <application|' "$MANIFEST"
+          grep -n "READ_SMS" "$MANIFEST"
+
       - run: flutter pub get
 
       - run: flutter build apk --release
