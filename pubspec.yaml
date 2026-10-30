@@ -1,0 +1,15 @@
+name: expense_tracker
+description: Expense tracker with Shamsi dates
+publish_to: "none"
+version: 1.0.0+1
+
+environment:
+  sdk: ">=3.0.0 <4.0.0"
+
+dependencies:
+  flutter:
+    sdk: flutter
+  shamsi_date: ^1.0.0
+
+flutter:
+  uses-material-design: true
